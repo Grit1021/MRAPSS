@@ -1,0 +1,574 @@
+## Preparation
+
+### 数据集
+
+```{r}
+data_v2 = data.frame(SNP = merged_v2$SNP,
+                   A1 = merged_v2$A1.x,
+                   A2 = merged_v2$A2.x,
+                   b.exp = merged_v2$Z.x/sqrt(merged_v2$N.x),
+                   b.out = merged_v2$Z.y/sqrt(merged_v2$N.y),
+                   se.exp = 1/sqrt(merged_v2$N.x),
+                   se.out = 1/sqrt(merged_v2$N.y),
+                   pval.exp = merged_v2$P.x,
+                   pval.out = merged_v2$P.y,
+                   L2 = merged_v2$L2)
+```
+
+### background model 参数
+
+```{r}
+C = matrix(as.vector(LDSC$I), nrow=2, ncol=2)
+Omega = matrix(as.vector(LDSC$cov)/M, nrow=2, ncol=2)
+```
+
+### 功能函数
+
+```{r}
+# The function for calculating evidence lower bound
+cal_elbo <- function(A, pi0, m, Pi, S, inv.S, Var, inv.Var, muj, Sigmaj, hat.b, C1, C2){
+
+return(
+
+# 第一部分specific
+sum(Pi *mapply(function(M1, vec1, vec2){t(vec1) %*% M1 %*% A %*% vec2}, vec1=hat.b, M1=inv.S, vec2=muj))
+    
+- 1/2 * sum(Pi*mapply(function(M1, vec1, M2){sum(diag(t(A) %*% M1 %*% A %*% (M2 + vec1 %*% t(vec1) )))},
+                          vec1=muj, M1=inv.S, M2=Sigmaj))
+
+- 1/2*sum(log(unlist(lapply(Var, det))))
+    
+# 合并上式右侧的第四五项
+- 1/2 * sum(Pi * mapply(function(M1, vec1, M2){sum(diag(M1 %*% (vec1 %*% t(vec1) + M2)))},
+                            vec1=muj, M1=inv.Var, M2=Sigmaj))
+    
+- sum(1-Pi)
+
++sum(Pi * log(pi0 + (pi0==0)) + (1-Pi)*log(1-pi0 + (pi0==1)))  # 避免对0取对数因此加入pi0==0 同理pi0==1
+
+# 合并上式右侧的第九十项
+- sum(Pi *log(2*pnorm(C1)) + (1-Pi)*log(2*pnorm(C2)))
+
+# 第二部分specific 问题：1+log(2*pi)的意义？
+
+ +  sum(Pi * (1 + log(2*pi) + 1/2 *log(unlist(lapply(Sigmaj, det))))) +
+      sum((1-Pi) * (1 + log(2*pi) + 
+      1/2 *log(unlist(lapply(Var, det)))))  # Pi对应\omega_j
+  
+
++ sum(-Pi * log(Pi + (Pi==0)) - (1-Pi) * log(1-Pi + (Pi==1)))
+
+
+# ------- constant -----------
+# potential constant（参考原来的p表达）
+-log(2*pi) * m  - 1/2*sum(log(unlist(lapply(S, det))))  # Z_j = 1
+
+- 1/2 *sum(mapply(function(M1, vec1){t(vec1) %*% M1 %*% vec1}, vec1=hat.b, M1=inv.S))  # Z_j = 1
+  
+-log(2*pi) * m  # Z_j = 0
+       
+)  
+    
+
+}
+
+```
+
+```{r}
+clump <- function(dat,
+                  IV.Threshold = 5e-05,
+                  SNP_col = "SNP",
+                  pval_col = "pval.exp",
+                  clump_kb = 1000,
+                  clump_r2 = 0.001,
+                  clump_p = 0.999,
+                  pop = "EUR",
+                  bfile = NULL,
+                  plink_bin = NULL){
+  
+  dat = dat[which(dat[, pval_col] <= IV.Threshold), ]
+    
+  df <- data.frame(rsid = dat[, SNP_col], pval = dat[,pval_col])
+  colnames(df) = c("rsid", "pval")
+
+  out <- ieugwasr::ld_clump(df, clump_kb=clump_kb, clump_r2=clump_r2, clump_p=clump_p, bfile=bfile, plink_bin = plink_bin, pop=pop)
+
+  MRdat <- dat[which(df$rsid %in% out$rsid),]
+  
+  if( IV.Threshold <= 5e-06){
+    
+    MRdat$Threshold =  IV.Threshold
+    
+  }else{
+    
+    ratio = ifelse(median(MRdat[, pval_col])/median(dat[, pval_col]) > 1, 1, median(MRdat[, pval_col])/median(dat[, pval_col]))
+    
+    MRdat$Threshold = ratio * IV.Threshold
+    
+  }
+
+  return(MRdat)
+}
+```
+
+```{r}
+# The function for calculating likelihood
+cal_likeli <- function(hat.b, A, Var, S, C1, C2, pi0){
+
+S2 <- mapply(function(M1,M2){M1 +  A %*% M2 %*% t(A) }, M1=S, M2=Var)
+S2 = lapply(split(S2, col(S2)), function(x){matrix(x, nrow=2, ncol=2)})
+
+P1 =  mapply(mvtnorm::dmvnorm, x= hat.b,  sigma=S2)
+P2 =  mapply(mvtnorm::dmvnorm, x= hat.b,  sigma=S)
+
+#return likelihood
+return(sum(log(pi0 * P1/2/pnorm(C1) + (1-pi0) * P2/2/pnorm(C2))))
+
+}
+```
+
+```{r}
+data_v3 <- clump(data_v2,
+                   IV.Threshold = 5e-05,
+                   SNP_col = "SNP",
+                   pval_col = "pval.exp",
+                   clump_kb = 1000,
+                   clump_r2 = 0.001,
+                   bfile = "/Users/liyuxin/Documents/zotero/RA/Options_Univ/HKUST_yang/Project1/MR-methods/1kg.v3/EUR/EUR",
+                   plink_bin = "/Library/Frameworks/R.framework/Versions/4.3-arm64/Resources/library/plinkbinr/bin/plink_Darwin")
+```
+
+## Initialization
+
+```{r}
+Cor.SelectionBias = T
+tol = 1e-08
+IV.Threshold = 5e-08 # IV selection threshold
+Threshold = 5e-08
+
+if(!Cor.SelectionBias){
+
+    Threshold = 1
+    message("Threshold = 1, the model will not correct for selection bias")
+
+}else{
+
+    Threshold = unique(data_v3$Threshold)
+
+    if(is.null(Threshold)) Threshold = max(data_v3$pval.exp)
+
+  }
+
+```
+
+```{r}
+m=nrow(data_v3)
+Cr <- abs(qnorm(Threshold/2))
+
+se.exp = data_v3$se.exp
+se.out = data_v3$se.out
+
+LDsc = data_v3$L2
+if(is.null(LDsc)) LDsc = rep(1, m)
+LDsc = ifelse(LDsc<1, 1, LDsc)
+
+# genome-wide shared
+Omega = matrix(LDsc, nrow=m, ncol=1) %*% matrix(as.vector(Omega), nrow = 1)
+
+# error term covaraince matrix: s_j(\rho)
+s = matrix(0, m, 4)
+s[1:m, 1] = se.exp^2 * drop(C[1,1])
+s[1:m, 4] = se.out^2 * drop(C[2,2])
+s[1:m, 2] = s[1:m, 3] =  drop(C[1,2]) * se.exp * se.out
+s11 =  s[1:m, 1] 
+#s11 =  se.exp^2 
+
+# genome wide shared + s_j(\rho)
+S = matrix(s + Omega, nrow=m, ncol=4)
+S11 = S[,1]
+
+sigma.sq = drop(max(mean(data_v3$b.exp^2) - mean(S[,1]), 1e-8))/mean(LDsc)
+
+
+tau.sq =  drop(max(mean(data_v3$b.out^2) - mean(S[,4]), 1e-8))/mean(LDsc)
+
+pi0 = 0.5
+beta = 0
+
+V1 = matrix(c(0,0,1,0),2,2,byrow = T)
+S = lapply(split(S, row(S)), function(x){matrix(x, nrow=2, ncol=2)})
+inv.S <- lapply(S, solve)
+
+hat.b = t(as.matrix(data_v3[,c("b.exp","b.out")]))
+hat.b = lapply(split(hat.b, col(hat.b)), function(x){c(x)})
+
+likelis = NULL
+elbos = NULL
+
+C_2 = - Cr*sqrt(s11)/sqrt(S11)
+
+```
+
+## 循环过程
+
+### Stage1
+
+```{r}
+for(i in 1:5000){
+# l_j^{-1}\Sigma^{-1} 
+Var =  LDsc*matrix(as.vector(diag(c(sigma.sq,tau.sq))), nrow=m,ncol=4, byrow=T)
+inv.Var =  1/LDsc*matrix(as.vector(diag(c(1/sigma.sq,1/tau.sq))), nrow=m,ncol=4, byrow=T)
+Var = lapply(split(Var, row(Var)), function(x){matrix(x, nrow=2, ncol=2)})
+inv.Var = lapply(split(inv.Var, row(inv.Var)), function(x){matrix(x, nrow=2, ncol=2)})
+
+# A(\beta)
+A = matrix(c(1, 0, beta, 1), 2,2, byrow = T)
+
+# E-step
+C_1 = - Cr*sqrt(s11)/sqrt(S11 + LDsc*sigma.sq)
+# C_1 = - Cr*sqrt(se.exp^2)/sqrt(S11 + LDsc*sigma.sq)
+
+# E_p[(gamma_j, \alpha_j) | Z_j =1], Var_p[(gamma_j, \alpha_j) | Z_j =0]
+inv.Sigmaj <-  mapply(function(M1, M2){t(A) %*% M1 %*% A + M2}, M1=inv.S, M2=inv.Var)
+inv.Sigmaj <- lapply(split(inv.Sigmaj, col(inv.Sigmaj)), function(x){matrix(x, nrow=2, ncol=2)})
+Sigmaj <- lapply(inv.Sigmaj, solve)
+muj <- mapply(function(M1, M2, vec1){M2 %*% t(A) %*% M1 %*% vec1},
+                  vec1=hat.b,
+                  M1=inv.S,
+                  M2=Sigmaj)
+muj = lapply(split(muj, col(muj)),
+                 function(x){matrix(x, nrow=2, ncol=1)})
+
+
+# E_p(Z_j) optimal value
+bj = 1/2 *mapply(function(M1, vec1){ t(vec1) %*% solve(M1) %*% vec1}, vec1 = muj, M1=Sigmaj) +
+        log(pi0/(1-pi0)) + 1/2* mapply(function(M1, M2){ log(det(M1)) - log(det(M2))}, M1 = Sigmaj, M2 = Var) +
+        log(pnorm(C_2)/pnorm(C_1))
+
+if(pi0 !=1)  {
+
+      bj = 1/2 *mapply(function(M1, vec1){ t(vec1) %*% solve(M1) %*% vec1}, vec1 = muj, M1=Sigmaj) +
+        log(pi0/(1-pi0)) + 1/2* mapply(function(M1, M2){ log(det(M1)) - log(det(M2))}, M1 = Sigmaj, M2 = Var) +
+        log(pnorm(C_2)/pnorm(C_1))
+
+Pi = 1/(1+exp(-bj))
+
+Pi = ifelse(Pi<1e-04, 1e-04, Pi)
+Pi = ifelse(Pi>0.9999, 0.9999, Pi)
+
+    }
+
+# Likelihood
+likeli <- cal_likeli(hat.b, A, Var, S, C_1, C_2, pi0)
+likelis <-  c(likelis, likeli)
+
+# ELBO = F
+if(i>1 && abs((likelis[i]-likelis[(i-1)])/likelis[(i-1)]) < tol)  break
+
+elbo <- cal_elbo(A, pi0, m, Pi, S, inv.S, Var, inv.Var, muj, Sigmaj, hat.b, C_1, C_2)
+elbos <-  c(elbos, elbo)
+
+# M step
+
+# update beta
+# temp1 = sum(Pi * mapply(function(vec1, M1,vec2)
+# return(t(vec1)%*% t(V1) %*% M1 %*% vec2),
+# vec1=muj, M1=inv.S, vec2= hat.b)) -
+# sum(Pi * mapply(function(M1,M2,vec1)
+# return(sum(diag(t(V1) %*% M1 %*% (M2 + vec1 %*% t(vec1))))),
+# M1 =inv.S , M2 = Sigmaj, vec1 = muj))
+# 
+# temp2 =
+# sum(Pi * mapply(function(M1,M2,vec1)
+# return(sum(diag(t(V1) %*% M1 %*% V1 %*% (M2 + vec1 %*% t(vec1))))),
+# M1 =inv.S , M2 = Sigmaj, vec1 = muj))
+# 
+# beta = temp1/temp2
+
+      
+## update pi0 when pi0!=1
+
+if(pi0!=1){
+
+      pi0 = sum(Pi)/m
+      # set lower bound and upper bound of $\pi_0$ to avoid log(0)
+      if(pi0<1e-04)   pi0 = 1e-04
+      if(pi0>0.9999)  pi0 = 0.9999
+
+}
+
+
+## update sigma^2
+mu.tr = data.table::transpose(muj)
+mu.vec = as.matrix(data.frame(mu.tr[[1]], mu.tr[[2]]))
+Sigma.tr = data.table::transpose(Sigmaj)
+Sigma.vec = as.matrix(data.frame(Sigma.tr[[1]], Sigma.tr[[4]]))
+A1 = sum(Pi * mu.vec[,1]^2/LDsc + Pi*Sigma.vec[,1]/LDsc)
+D1 = sum(Pi)/sigma.sq
+B1 =  sum(Pi * dnorm(C_1)/pnorm(C_1) * Cr * LDsc * sqrt(s11) * (S11 + LDsc*sigma.sq)^(-3/2))
+sigma.sq = sqrt(A1/(D1 + B1))
+
+
+
+# update tau^2
+A2 = sum(Pi*mu.vec[,2]^2/LDsc + Pi*Sigma.vec[,2]/LDsc)
+tau.sq = A2/sum(Pi)
+
+
+}
+```
+
+```{r}
+fix.tau = F
+fix.sigma = F
+step_1<- list(beta = beta,
+              sigma.sq=sigma.sq,
+              tau.sq =tau.sq,
+              pi0 = pi0,
+              fix.tau = fix.tau,
+              fix.sigma = fix.sigma,
+              post = list(mu = mu.vec, Pi = Pi, IVsignal.sum =  sum(Pi * mu.vec[,1]^2 + Pi*Sigma.vec[,1])),
+              likeli = likeli,
+              likelis = likelis,
+              elbos = elbos,
+              Threshold = Threshold)
+```
+
+```{r}
+step_1
+```
+
+### Stage 2
+
+```{r}
+beta = 0
+pi0 = step_1$pi0
+
+# instrument strength variance
+sigma.sq = step_1$sigma.sq
+
+# direct effect variance
+tau.sq =  step_1$tau.sq
+
+```
+
+```{r}
+for(i in 1:5000){
+# l_j^{-1}\Sigma^{-1} 
+Var =  LDsc*matrix(as.vector(diag(c(sigma.sq,tau.sq))), nrow=m,ncol=4, byrow=T)
+inv.Var =  1/LDsc*matrix(as.vector(diag(c(1/sigma.sq,1/tau.sq))), nrow=m,ncol=4, byrow=T)
+Var = lapply(split(Var, row(Var)), function(x){matrix(x, nrow=2, ncol=2)})
+inv.Var = lapply(split(inv.Var, row(inv.Var)), function(x){matrix(x, nrow=2, ncol=2)})
+
+# A(\beta)
+A = matrix(c(1, 0, beta, 1), 2,2, byrow = T)
+
+# E-step
+C_1 = - Cr*sqrt(s11)/sqrt(S11 + LDsc*sigma.sq)
+# C_1 = - Cr*sqrt(se.exp^2)/sqrt(S11 + LDsc*sigma.sq)
+
+# E_p[(gamma_j, \alpha_j) | Z_j =1], Var_p[(gamma_j, \alpha_j) | Z_j =0]
+inv.Sigmaj <-  mapply(function(M1, M2){t(A) %*% M1 %*% A + M2}, M1=inv.S, M2=inv.Var)
+inv.Sigmaj <- lapply(split(inv.Sigmaj, col(inv.Sigmaj)), function(x){matrix(x, nrow=2, ncol=2)})
+Sigmaj <- lapply(inv.Sigmaj, solve)
+muj <- mapply(function(M1, M2, vec1){M2 %*% t(A) %*% M1 %*% vec1},
+                  vec1=hat.b,
+                  M1=inv.S,
+                  M2=Sigmaj)
+muj = lapply(split(muj, col(muj)),
+                 function(x){matrix(x, nrow=2, ncol=1)})
+
+
+# E_p(Z_j) optimal value
+bj = 1/2 *mapply(function(M1, vec1){ t(vec1) %*% solve(M1) %*% vec1}, vec1 = muj, M1=Sigmaj) +
+        log(pi0/(1-pi0)) + 1/2* mapply(function(M1, M2){ log(det(M1)) - log(det(M2))}, M1 = Sigmaj, M2 = Var) +
+        log(pnorm(C_2)/pnorm(C_1))
+
+Pi = 1/(1+exp(-bj))
+
+Pi = ifelse(Pi<1e-04, 1e-04, Pi)
+Pi = ifelse(Pi>0.9999, 0.9999, Pi)
+
+# Likelihood
+likeli <- cal_likeli(hat.b, A, Var, S, C_1, C_2, pi0)
+likelis <-  c(likelis, likeli)
+
+# ELBO = F
+if(i>1 && abs((likelis[i]-likelis[(i-1)])/likelis[(i-1)]) < tol)  break
+
+elbo <- cal_elbo(A, pi0, m, Pi, S, inv.S, Var, inv.Var, muj, Sigmaj, hat.b, C_1, C_2)
+elbos <-  c(elbos, elbo)
+
+# M step
+
+# update beta
+temp1 = sum(Pi * mapply(function(vec1, M1,vec2)
+return(t(vec1)%*% t(V1) %*% M1 %*% vec2),
+vec1=muj, M1=inv.S, vec2= hat.b)) -
+sum(Pi * mapply(function(M1,M2,vec1)
+return(sum(diag(t(V1) %*% M1 %*% (M2 + vec1 %*% t(vec1))))),
+M1 =inv.S , M2 = Sigmaj, vec1 = muj))
+
+temp2 =
+sum(Pi * mapply(function(M1,M2,vec1)
+return(sum(diag(t(V1) %*% M1 %*% V1 %*% (M2 + vec1 %*% t(vec1))))),
+M1 =inv.S , M2 = Sigmaj, vec1 = muj))
+
+beta = temp1/temp2
+
+      
+## update pi0 when pi0!=1
+pi0 = sum(Pi)/m
+# set lower bound and upper bound of $\pi_0$ to avoid log(0)
+if(pi0<1e-04)   pi0 = 1e-04
+if(pi0>0.9999)  pi0 = 0.9999
+
+
+
+## update sigma^2
+mu.tr = data.table::transpose(muj)
+mu.vec = as.matrix(data.frame(mu.tr[[1]], mu.tr[[2]]))
+Sigma.tr = data.table::transpose(Sigmaj)
+Sigma.vec = as.matrix(data.frame(Sigma.tr[[1]], Sigma.tr[[4]]))
+A1 = sum(Pi * mu.vec[,1]^2/LDsc + Pi*Sigma.vec[,1]/LDsc)
+D1 = sum(Pi)/sigma.sq
+B1 =  sum(Pi * dnorm(C_1)/pnorm(C_1) * Cr * LDsc * sqrt(s11) * (S11 + LDsc*sigma.sq)^(-3/2))
+sigma.sq = sqrt(A1/(D1 + B1))
+
+
+
+# update tau^2
+A2 = sum(Pi*mu.vec[,2]^2/LDsc + Pi*Sigma.vec[,2]/LDsc)
+tau.sq = A2/sum(Pi)
+
+
+}
+```
+
+```{r}
+step_2<- list(beta = beta,
+              sigma.sq=sigma.sq,
+              tau.sq =tau.sq,
+              pi0 = pi0,
+              fix.tau = fix.tau,
+              fix.sigma = fix.sigma,
+              post = list(mu = mu.vec, Pi = Pi, IVsignal.sum =  sum(Pi * mu.vec[,1]^2 + Pi*Sigma.vec[,1])),
+              likeli = likeli,
+              likelis = likelis,
+              elbos = elbos,
+              Threshold = Threshold)
+```
+
+```{r}
+step_2
+```
+
+### Inference & Result
+
+```{r}
+LR = 2*(step_2$likeli-step_1$likeli)
+pvalue = pchisq(LR,1,lower.tail = F)
+pvalue = formatC(pvalue, format = "e", digits = 4)
+beta.se = suppressWarnings(abs(step_2$beta/sqrt(LR)))
+```
+
+```{r}
+exposure = 'BMI'
+outcome = 'CAD'
+
+  cat("***********************************************************\n")
+  cat("MR test results of ", exposure , " on ", outcome, ": \n")
+  cat("MR-APSS: beta = ", round(step_2$beta,4), ", beta.se = ", round(beta.se, 4), ", p-value = ", pvalue, ".", "\n")
+  cat("Total NO. of IVs= ", nrow(data_v3), ", NO. of valid IVs with foreground signals: ", step_2$pi0 * nrow(data_v3), ".", "\n")
+  cat("***********************************************************\n")
+```
+
+## Real data analysis
+
+```{r}
+run_APSS_func <- function(clumped=NULL,
+                          exposure=NULL,
+                          outcome=NULL,
+                          C = diag(2),
+                          Omega = matrix(0, 2, 2),
+                          IV.Threshold = 5e-08, # IV selection threshold
+                          Threshold = 5e-08,    # threshold for correcting for selection bias
+                          Cor.SelectionBias=T){
+  
+ 
+  res=NULL
+  
+  for(i in 1:length(Threshold)){
+    
+    if(!is.null(clumped)){
+      
+      test = subset(clumped, pval.exp <= IV.Threshold[i])
+      if(nrow(test) < 4 ) next
+      test$Threshold = Threshold[i]
+      cat("IV selection threshold:", IV.Threshold[i] ,"\n")
+      
+      
+      MRres = try(MRAPSS::MRAPSS(test,
+                                 exposure=exposure,
+                                 outcome=outcome,
+                                 C= C,
+                                 Omega= Omega,
+                                 Cor.SelectionBias = Cor.SelectionBias))
+      
+      if(inherits(MRres, 'try-error')) {
+        MRres=NULL
+      }
+    }
+    
+    
+    res0 = data.frame(exposure = MRres$exposure,
+                      outcome = MRres$outcome,
+                      nSNP = nrow(MRres$MRdat),
+                      pi0 = MRres$pi0,
+                      nvalid = nrow(MRres$MRdat)*MRres$pi0,
+                      sigma.sq= MRres$sigma.sq,
+                      tau.sq= MRres$tau.sq,
+                      beta = MRres$beta,
+                      se = MRres$beta.se,
+                      pval= MRres$pvalue,
+                      method = MRres$method,
+                      Threshold = Threshold[i],
+                      IVstrength = MRres$IVsignal.sum
+    )
+    
+    if(nrow(res0)!=0){
+      res0$IV.Threshold = IV.Threshold[i]
+    }
+    
+    res = rbind(res, res0)
+    
+  }
+  
+  return(res)
+  
+}
+```
+
+```{r}
+IV.Threshold = 5e-05
+clumped = data_v3
+C = matrix(as.vector(LDSC$I), nrow=2, ncol=2)
+Omega = matrix(as.vector(LDSC$cov)/M, nrow=2, ncol=2)
+Threshold =  ifelse(IV.Threshold==5e-05, unique(clumped$Threshold), IV.Threshold)
+exposure = "BMI"
+outcome = "CAD"
+
+res = run_APSS_func(clumped = clumped,
+                        exposure = exposure,
+                        outcome = outcome,
+                        C = C,
+                        Omega=Omega,
+                        IV.Threshold = IV.Threshold,
+                        Threshold = Threshold,
+                        Cor.SelectionBias = T)
+    
+```
+
+```{r}
+res
+```

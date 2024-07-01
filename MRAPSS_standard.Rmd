@@ -1,0 +1,102 @@
+# Real Data Analysis Reference
+
+```{r}
+devtools::install_github("YangLabHKUST/MR-APSS")
+
+```
+
+```{r}
+library(MRAPSS)
+library(readr)
+```
+
+## Format Data
+
+```{r}
+BMI_raw <- readr::read_delim("./BMI.txt", "\t", escape_double = FALSE,
+trim_ws = TRUE, progress = F)
+```
+
+```{r}
+CAD_raw <- readr::read_delim("./CAD.txt", "\t", escape_double = FALSE,
+trim_ws = TRUE, progress = F)
+```
+
+```{r}
+BMI = format_data(BMI_raw,
+snp_col = "SNPID_UKB",
+b_col = "BETA",
+se_col = "SE",
+freq_col = "MAF_UKB",
+A1_col = "A1",
+A2_col = "A2",
+p_col = "P",
+n_col = "NMISS",
+info_col = "INFO_UKB")
+```
+
+```{r}
+CAD = format_data(CAD_raw,
+                  snp_col = "markername",
+                  b_col = "beta",
+                  se_col = "se",
+                  freq_col = "effect_allele_freq",
+                  A1_col = "effect_allele",
+                  A2_col = "noneffect_allele",
+                  p_col = "p_dgc",
+                  n = 184305)
+```
+
+## Harmonize the dataset & Parameter estimation
+
+```{r}
+paras = est_paras(dat1 = BMI,
+dat2 = CAD,
+trait1.name = "BMI",
+trait2.name = "CAD",
+ldscore.dir ="/Users/liyuxin/Documents/zotero/RA/Options_Univ/HKUST_yang/Project1/MR-methods/eur_w_ld_chr")
+```
+
+```{r}
+paras$Omega
+```
+
+```{r}
+paras$C
+```
+
+```{r}
+head(paras$dat)
+```
+
+## LD clumping
+
+```{r}
+MRdat<- clump(paras$dat,
+                   IV.Threshold = 5e-05,
+                   SNP_col = "SNP",
+                   pval_col = "pval.exp",
+                   clump_kb = 1000,
+                   clump_r2 = 0.001,
+                   bfile = "/Users/liyuxin/Documents/zotero/RA/Options_Univ/HKUST_yang/Project1/MR-methods/1kg.v3/EUR/EUR",
+                   plink_bin = "/Library/Frameworks/R.framework/Versions/4.3-arm64/Resources/library/plinkbinr/bin/plink_Darwin")
+```
+
+```{r}
+head(MRdat)
+```
+
+## Fit MRAPSS
+
+```{r}
+MRres = MRAPSS(MRdat,
+exposure = "BMI",
+outcome = "CAD",
+C = paras$C,
+Omega = paras$Omega ,
+Cor.SelectionBias = T)
+```
+
+```{r}
+
+```
